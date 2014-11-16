@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+verbose=0
+mode=flac_alac
+tempdir=/run/shm
+#set -x
+usage() {
+
+    I_USAGE="
+    Description: Convert video and audio formats
+
+    Dependencies:
+
+    Ubuntu trusty with this repo specifically to provide the Fraunhoffer FDK AAC codec
+
+    sudo add-apt-repository ppa:robert-tari/main
+    sudo add-apt-repository ppa:mc3man/trusty-media
+    sudo apt-get update
+    sudo apt-get install libav-tools flac fdkaac-encoder neroaac
+
+    http://trac.ffmpeg.org/wiki/Encode/AAC
+
+    Options:
+
+    -o | --mode) sourceformat_targetformat, lossless formats:- alac, flac, wav. lossyformats: mp3 aac
+    -d | --deletesource) delete the source file after completion
+    -s | --sourcedir) source directory to look for files
+    -t | --tempdir) temporary directory to copy files to before passing to ffmpeg (/dev/shm)
+    "
+
+    echo "$I_USAGE"
+    exit
+
+}
+
+[ -z $1 ] && usage
+
+while :
+do
+  case $1 in
+    -h | --help | -\?) usage; avconv -codecs ; exit 0 ;;
+    -f | --force) force=1 ; shift ;;
+    -m | --dummy) dummy=1 ; shift ;;
+    -v | --verbose) verbose=$((verbose+1)) ; shift ;;
+
+    -d | --deletesource) deletesource="true"; shift ;;
+    -o | --mode) mode=$2 ; shift 2 ;;
+    -s | --sourcedir) sourcedir=$2 ; shift 2 ;;
+    -t | --tempdir) tempdir=$2 ; shift 2 ;;
+    --) shift ; break ;;
+    -*) echo "WARN: Unknown option (ignored): $1" >&2 ; shift ;;
+    *)  break ;;
+  esac
+done
+
+verbose(){
+  [ $verbose -ge 1 ] && echo "$1"
+}
+
+run_with_conditions(){
+  verbose "$@"
+  "$@"
+}
+
+
+# split our arguments
+sourceformat=$(echo $mode | cut --delimiter='_' -f 1)
+targetformat=$(echo $mode | cut --delimiter='_' -f 2)
+
+# translate human encoding formats into their ffmpeg specific versions
+case $targetformat in
+  'alac') targetextension='m4a';;
+  'aac')  targetformat='libfdk_aac'; targetextension='m4a';;
+  *) targetextension=$targetformat;;
+esac
+
+# handle spaces and newlines
+find "${sourcedir}" -type f -name "*.${sourceformat}" -print0 | while IFS="" read -r -d "" file ; do
+
+  # NOTE: ffmpeg interprets many characters as params so work using temporary filenames
+  cp -- "$file" "${tempdir}/audioconvert.${sourceformat}"
+
+  # NOTE: some ffmpeg conversions failed so resorted to using individual per codec encoders in some cases.
+  case $mode in
+    'flac_aac')
+      flac -s -d -c ${tempdir}/audioconvert.${sourceformat} | neroAacEnc -ignorelength -q 0.75 -if - -of "${tempdir}/audioconvert.${targetextension}" ;;
+    # hung with 100% cpu
+    # http://www.hydrogenaud.io/forums/index.php?showtopic=106180
+    #'flac_aac') flac -s -d -c ${tempdir}/audioconvert.${sourceformat} | fdkaac --bitrate 256 --bitrate-mode 0 -o ${tempdir}/audioconvert.${targetextension} - ;;
+    *) ffmpeg -threads 0 -i ${tempdir}/audioconvert.${sourceformat} -c:a ${targetformat} ${tempdir}/audioconvert.${targetextension} ;;
+  esac
+
+  cp -- "${tempdir}/audioconvert.${targetextension}" "${file%.*}.${targetextension}"
+
+  # cleanup before next run
+  rm ${tempdir}/audioconvert.${sourceformat} ${tempdir}/audioconvert.${targetextension}
+
+  [ $deletesource ] && rm "$file"
+done
+
+
